@@ -117,7 +117,9 @@ const asyncPool = async (poolLimit, array, iteratorFn) => {
     //消除空XML tags、两端空白符和多余的\n
     content = content.replace(/<regex( +order *= *\d)?>.*?<\/regex>/gm, '')
         .replace(/(\r\n|\r|\\n)/gm, '\n')
+        .replace(/\\r/gm, '\r')
         .replace(/\s*<\|curtail\|>\s*/g, '\n')
+        .replace(/\s*<\|join\|>\s*/g, '')
         .replace(/\n<\/(card|hidden|META)>\s+?<\1>\n/g, '\n')
         .replace(/\n<(\/?card|example|hidden|plot|META)>\s+?<\1>/g, '\n<$1>')
         .replace(/(?:<!--.*?-->\n|.+?: ?\n)?<(card|example|hidden|plot|META)>\s+?<\/\1>\n*/g, '')
@@ -126,7 +128,7 @@ const asyncPool = async (poolLimit, array, iteratorFn) => {
         .replace(/\s*\n\n(H(uman)?|A(ssistant)?): +/g, '\n\n$1: ');
     //确保格式正确
     if (apiKey) {
-        content = content.replace(/\n\n(Assistant|Human):(?!.*?\n\n(Assistant|Human):).*$/s, function(match, p1) {return p1 === 'Assistant' ? match : match + '\n\nAssistant:'}).replace(/\s*<\|noAssistant\|>\s*(.*?)(?:\n\nAssistant:\s*)?$/s, '\n\n$1');
+        content = content.replace(/(\n\nHuman:(?!.*?\n\nAssistant:).*?|(?<!\n\nAssistant:.*?))$/s, '$&\n\nAssistant:').replace(/\s*<\|noAssistant\|>\s*(.*?)(?:\n\nAssistant:\s*)?$/s, '\n\n$1');
         content.includes('<|reverseHA|>') && (content = content.replace(/\s*<\|reverseHA\|>\s*/g, '\n\n').replace(/Assistant|Human/g, function(match) {return match === 'Human' ? 'Assistant' : 'Human'}).replace(/\n(A|H): /g, function(match, p1) {return p1 === 'A' ? '\nH: ' : '\nA: '}));
         return content.replace(Config.Settings.padtxt ? /\s*<\|(?!padtxt).*?\|>\s*/g : /\s*<\|.*?\|>\s*/g, '\n\n').trim().replace(/^.+:/, '\n\n$&').replace(/(?<=\n)\n(?=\n)/g, '');
     } else {
@@ -403,9 +405,9 @@ const updateParams = res => {
         res.json({
 /***************************** */
             data: [ //data: AI.mdl().map((name => ({
-                ...AI.mdl().slice(1).map((name => ({ id: name }))), {
+                ...AI.mdl().map((name => ({ id: name }))), {
+                    id: 'claude-default'            },{
                     id: 'claude-1.3'                },{
-                    id: 'claude-2'                  },{
                     id: 'claude-2.1-acorn'          },{
                     id: 'claude-2.1-basil'          },{
                     id: 'claude-2.1-cocoa'          },{
@@ -416,8 +418,6 @@ const updateParams = res => {
                     id: 'claude-2.1-gem'            },{
                     id: 'claude-2.1-pasta'          },{
                     id: 'claude-2.1-surf'           },{
-                    id: 'claude-3-opus-20240229'    },{
-                    id: 'claude-3-sonnet-20240229'  },{
                     id: 'claude-instant-1.1'        //id: name
             }] //})))
 /***************************** */
@@ -445,12 +445,12 @@ const updateParams = res => {
                     let {messages} = body;
 /************************* */
                     apiKey = req.headers.authorization?.match(/sk-ant-api\d\d-[\w-]{86}-[\w-]{6}AA/g) || req.headers.authorization?.match(/(?<=3rdKey:).*/)?.map(item => item.trim())[0].split(/ ?, ?/);
-                    model = apiKey || Config.Settings.PassParams && body.model.includes('claude-') || isPro && AI.mdl().includes(body.model) ? body.model : cookieModel;
+                    model = apiKey || Config.Settings.PassParams && /claude-(?!default)/.test(body.model) || isPro && AI.mdl().includes(body.model) ? body.model : cookieModel;
                     submodel = /claude-\d.+/.test(body.model) ? body.model : '';
                     let max_tokens_to_sample = body.max_tokens, stop_sequences = body.stop || [], top_p = body.top_p, top_k = body.top_k;
                     if (!apiKey && Config.ProxyPassword != '' && req.headers.authorization != 'Bearer ' + Config.ProxyPassword) {
                         throw Error('ProxyPassword Wrong');
-                    } else if (!changing && !apiKey && (!Config.Settings.PassParams && !isPro && submodel && submodel != cookieModel || invalidtime >= Config.CookieArray?.length)) {
+                    } else if (!changing && !apiKey && (!Config.Settings.PassParams && !isPro && submodel && submodel != cookieModel || invalidtime > Config.CookieArray?.length)) {
                         changing = true;
                         CookieChanger.emit('ChangeCookie');
                     }
@@ -677,7 +677,7 @@ const updateParams = res => {
                         };
                     })(messages, type);
 /******************************** */
-                    const messagesAPI = /<\|messagesAPI\|>/.test(prompt);
+                    const messagesAPI = /<\|messagesAPI\|>/.test(prompt), messagesLog = /<\|messagesLog\|>/.test(prompt);
                     apiKey && messagesAPI && (type = 'msg_api');
                     prompt = Config.Settings.xmlPlot ? xmlPlot(prompt, !/claude-(2\.[1-9]|[3-9])/.test(model)) : apiKey ? `\n\nHuman: ${genericFixes(prompt)}\n\nAssistant:` : genericFixes(prompt).trim();
                     if (Config.Settings.FullColon) if (/claude-(2\.(1-|[2-9])|[3-9])/.test(model)) {
@@ -695,13 +695,16 @@ const updateParams = res => {
                             let messages, system;
                             if (messagesAPI) {
                                 const rounds = prompt.replace(/\n\nAssistant: *$/, '').split('\n\nHuman:');
-                                messages = (Config.Settings.FullColon ? rounds.slice(1).reduce((acc, current) => {
-                                    acc.push(current);
-                                    return acc.length > 1 && !acc[acc.length - 2].includes('\n\nAssistant:') ? acc.slice(0, -2).concat(acc.slice(-2).join('\n\r\nHuman:')) : acc;
-                                }, []) : rounds.slice(1)).flatMap(round => {
-                                    const turns = Config.Settings.FullColon ? round.replace(/(?<=\n\nAssistant:.*?)\n(\nAssistant:)/g, '\n\r$1').split('\n\nAssistant:') : round.split('\n\nAssistant:');
-                                    return [{role: 'user', content: turns[0].trim()}].concat(turns.slice(1).flatMap(turn => [{role: 'assistant', content: turn.trim()}]))
-                                }), system = rounds[0].trim();
+                                messages = rounds.slice(1).flatMap(round => {
+                                    const turns = round.split('\n\nAssistant:');
+                                    return [{role: 'user', content: turns[0].trim().replace(/^$/,' ')}].concat(turns.slice(1).flatMap(turn => [{role: 'assistant', content: turn.trim().replace(/^$/,' ')}]))
+                                }).reduce((acc, current) => {
+                                    if (Config.Settings.FullColon && acc[acc.length - 1]?.role === current.role) {
+                                        acc[acc.length - 1].content += (current.role === 'user' ? '\n\r\nHuman:' : '\n\r\nAssistant:') + current.content;
+                                    } else acc.push(current);
+                                    return acc;
+                                }, []), system = rounds[0].trim();
+                                messagesLog && console.log({system, messages});
                             }
                             const res = await fetch(`${(Config.api_rProxy || 'https://api.anthropic.com').replace(/\/v1 *$/,'')}/v1/${messagesAPI ? 'messages' : 'complete'}`, {
                                 method: 'POST',
